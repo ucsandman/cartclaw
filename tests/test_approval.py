@@ -88,6 +88,7 @@ async def test_approval_works_without_screenshot(desk_and_calls):
 CARDS = [
     parse.PaymentOption("Visa ending in 0000", "0000", False),
     parse.PaymentOption("Discover ending in 1111", "1111", False),
+    parse.PaymentOption("MasterCard ending in 2222", "2222", False),
 ]
 
 
@@ -101,7 +102,7 @@ async def card_desk():
 
     async def change_card(a, last4):
         switched.append(last4)
-        if last4 == "0000":
+        if last4 == "2222":
             raise RuntimeError("Amazon wants you to confirm the card")
         return replace(SUMMARY, paying_with=f"Discover {last4}"), None, CARDS
 
@@ -115,9 +116,12 @@ async def card_desk():
     desk.close()
 
 
-async def pick(desk, a, card):
+async def pick(desk, a, card, decision="card"):
     code, _ = await asyncio.to_thread(
-        fetch, f"{desk.base}/a/{a.id}/card", {"n": a.nonce, "card": card}, desk.base
+        fetch,
+        f"{desk.base}/a/{a.id}/decide",
+        {"n": a.nonce, "card": card, "decision": decision},
+        desk.base,
     )
     for _ in range(50):
         if desk.get(a.id).status != "switching":
@@ -134,9 +138,25 @@ async def test_card_picker_switches_card_then_places_on_it(card_desk):
     assert await pick(desk, a, "1111") == 303
     assert switched == ["1111"] and a.status == "pending"
     assert a.summary.paying_with == "Discover 1111"
-    await post(desk, a, "approve")
+    await pick(
+        desk, a, "1111", decision="approve"
+    )  # the browser sends the dropdown too
     await settle(desk, a)
     assert placed == ["Discover 1111"]
+
+
+async def test_place_order_with_another_card_picked_switches_and_does_not_buy(
+    card_desk,
+):
+    # The card dropdown sits next to Place order; clicking Place order after picking a
+    # different card must never charge the card the page was showing.
+    desk, placed, switched = card_desk
+    a = desk.create(SUMMARY, b"", CARDS)
+    assert await pick(desk, a, "1111", decision="approve") == 303
+    assert placed == [] and switched == ["1111"] and a.status == "pending"
+    _, page = await asyncio.to_thread(fetch, desk.url(a))
+    assert "Card switched to Discover ending in 1111" in page
+    assert "Nothing is ordered yet" in page
 
 
 async def test_card_not_saved_is_refused(card_desk):
@@ -149,7 +169,7 @@ async def test_card_not_saved_is_refused(card_desk):
 async def test_failed_card_switch_keeps_order_and_says_why(card_desk):
     desk, _, _ = card_desk
     a = desk.create(SUMMARY, b"", CARDS)
-    assert await pick(desk, a, "0000") == 303
+    assert await pick(desk, a, "2222") == 303
     assert a.status == "pending" and a.summary.paying_with == "Visa 0000"
     _, page = await asyncio.to_thread(fetch, desk.url(a))
     assert "Card not changed: Amazon wants you to confirm the card" in page

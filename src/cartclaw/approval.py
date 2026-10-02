@@ -35,6 +35,7 @@ class Approval:
     detail: str = ""
     order_number: str | None = None
     cards: list[PaymentOption] = field(default_factory=list)
+    note: str = ""  # shown on the page after a card switch
 
 
 PlaceFn = Callable[[Approval], Awaitable[str | None]]
@@ -108,10 +109,19 @@ class Desk:
                 a.status = "expired"
             return a
 
-    def decide(self, approval_id: str, nonce: str, decision: str) -> tuple[int, str]:
+    def decide(
+        self, approval_id: str, nonce: str, decision: str, card: str = ""
+    ) -> tuple[int, str]:
         a = self.get(approval_id)
         if not a or not secrets.compare_digest(a.nonce, nonce):
             return 403, "This approval link is not valid."
+        # The card dropdown belongs to this form. Place order with a different card picked
+        # switches the card and shows the order again; it never buys on the card shown before.
+        if decision in ("card", "approve") and card:
+            if card != parse.card_last4(a.summary.paying_with):
+                return self.switch_card(approval_id, nonce, card)
+        if decision == "card":
+            return 200, "unchanged"
         with self._lock:
             if a.status != "pending":
                 return 409, f"This request is already {a.status}."
@@ -133,7 +143,7 @@ class Desk:
                 return 409, f"This request is already {a.status}."
             if not self._change_card or last4 not in {c.last4 for c in a.cards}:
                 return 400, "That card is not one of your saved cards."
-            a.status, a.detail = "switching", ""
+            a.status, a.detail, a.note = "switching", "", ""
         asyncio.run_coroutine_threadsafe(self._run_switch(a, last4), self._loop)
         return 200, "switching"
 
@@ -148,6 +158,11 @@ class Desk:
                 return
             if result:
                 a.summary, a.screenshot, a.cards = result
+                label = next((c.label for c in a.cards if c.last4 == last4), last4)
+                a.note = (
+                    f"Card switched to {label}. Nothing is ordered yet: "
+                    "check the total, then click Place order."
+                )
             a.status, a.detail, a.created = "pending", detail, time.time()
 
     async def _run_place(self, a: Approval) -> None:
@@ -225,17 +240,15 @@ def _handler(desk: Desk) -> type[BaseHTTPRequestHandler]:
             parts = urlparse(self.path).path.strip("/").split("/")
             length = int(self.headers.get("Content-Length") or 0)
             form = parse_qs(self.rfile.read(length).decode())
-            if len(parts) != 3 or parts[0] != "a" or parts[2] not in ("decide", "card"):
+            if len(parts) != 3 or parts[0] != "a" or parts[2] != "decide":
                 return self._send(404, _page("Not found", "<p>Not found.</p>"))
             nonce = (form.get("n") or [""])[0]
-            if parts[2] == "card":
-                code, msg = desk.switch_card(
-                    parts[1], nonce, (form.get("card") or [""])[0]
-                )
-            else:
-                code, msg = desk.decide(
-                    parts[1], nonce, (form.get("decision") or [""])[0]
-                )
+            code, msg = desk.decide(
+                parts[1],
+                nonce,
+                (form.get("decision") or [""])[0],
+                (form.get("card") or [""])[0],
+            )
             if code != 200:
                 return self._send(code, _page("Not done", f"<p>{html.escape(msg)}</p>"))
             self.send_response(303)
@@ -298,15 +311,22 @@ def render(a: Approval, url: str) -> bytes:
             f'<option value="{e(c.last4)}"{" selected" if c.last4 == current else ""}>{e(c.label)}</option>'
             for c in a.cards
         )
+        # form="decide": the picked card is sent with Place order too, see Desk.decide.
         pick = (
-            f'<form class="pick" method="post" action="/a/{e(a.id)}/card"><input type="hidden" name="n" value="{e(a.nonce)}">'
-            f'<select name="card" aria-label="Card">{options}</select><button>Use this card</button></form>'
+            f'<div class="pick"><select name="card" form="decide" aria-label="Card">{options}</select>'
+            f'<button form="decide" name="decision" value="card">Use this card</button></div>'
         )
     facts = (
         f"<dl><dt>Deliver to</dt><dd>{e(s.deliver_to)}</dd><dt>Pay with</dt><dd>{e(s.paying_with)}{pick}</dd>"
         f"<dt>Delivery</dt><dd>{e(s.arriving)}</dd></dl>"
     )
-    problem = f'<p class="note bad">{e(a.detail)}</p>' if a.detail else ""
+    notice = (
+        f'<p class="note bad">{e(a.detail)}</p>'
+        if a.detail
+        else f'<p class="note">{e(a.note)}</p>'
+        if a.note
+        else ""
+    )
     shot = (
         f'<details><summary>Amazon\'s checkout page, as captured</summary><img src="{e(url.replace("?", "/shot.png?", 1))}" alt="Amazon checkout page screenshot"></details>'
         if a.screenshot
@@ -316,14 +336,14 @@ def render(a: Approval, url: str) -> bytes:
     if a.status == "pending":
         minutes = max(1, int((a.created + TTL_SECONDS - time.time()) // 60))
         form = (
-            f'<form method="post" action="/a/{e(a.id)}/decide"><input type="hidden" name="n" value="{e(a.nonce)}">'
+            f'<form id="decide" method="post" action="/a/{e(a.id)}/decide"><input type="hidden" name="n" value="{e(a.nonce)}">'
             f'<div class="actions"><button class="go" name="decision" value="approve">Place order &middot; {_money(s.total)}</button>'
             f'<button name="decision" value="reject">Don\'t buy</button></div></form>'
         )
         body = (
             f'{head}<h1>Approve this Amazon order?</h1><p class="lede">Your agent asked to buy this. '
             f'Nothing is ordered until you click Place order.</p><div class="card"><p class="total">{_money(s.total)}</p>'
-            f'<ul class="items">{items}</ul><table>{rows}</table>{facts}{problem}{form}'
+            f'<ul class="items">{items}</ul><table>{rows}</table>{facts}{notice}{form}'
             f'<p class="note">This request expires in {minutes} min. The order is checked again right before it is placed; '
             f"if the total, items, address or card changed, nothing is ordered.</p></div>{shot}"
         )
