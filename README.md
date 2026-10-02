@@ -47,6 +47,12 @@ Optional settings (environment variables): `CARTCLAW_BROWSER` (browser path), `C
 
 `git clone https://github.com/ucsandman/cartclaw && cd cartclaw && uv sync`. The marketing site at [cartclaw.dev](https://cartclaw.dev) is static HTML plus one Vercel function in `site/`.
 
+Site operations (2026-10-02):
+- A push to `main` deploys the site. The Vercel project's root directory is `site`.
+- Google Search Console and Bing verify through the `google-site-verification` and `msvalidate.01` meta tags in `site/index.html`. Removing either tag revokes that verification.
+- Vercel Web Analytics loads from `/_vercel/insights/script.js` on every page.
+- Pro waitlist signups are stored as private files in the Vercel Blob store `cartclaw-waitlist`.
+
 - `uv run pytest`: parsers against saved Amazon pages (personal details scrubbed), the approval page, and the tool list. No network.
 - `uv run python scripts/live_smoke.py`: read-only check against your real account over the MCP protocol.
 
