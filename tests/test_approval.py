@@ -1,0 +1,154 @@
+import asyncio
+import urllib.error
+import urllib.parse
+import urllib.request
+from pathlib import Path
+
+import pytest
+
+from cartclaw import parse
+from cartclaw.approval import Desk
+
+SUMMARY = parse.parse_checkout(
+    (Path(__file__).parent / "fixtures" / "checkout.html").read_text(encoding="utf-8")
+)
+
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
+def fetch(
+    url: str, data: dict | None = None, origin: str | None = None
+) -> tuple[int, str]:
+    body = urllib.parse.urlencode(data).encode() if data is not None else None
+    req = urllib.request.Request(url, data=body)
+    if origin:
+        req.add_header("Origin", origin)
+    try:
+        with urllib.request.build_opener(NoRedirect).open(req, timeout=5) as r:
+            return r.status, r.read().decode(errors="replace")
+    except urllib.error.HTTPError as e:
+        return e.code, e.read().decode(errors="replace")
+
+
+@pytest.fixture
+async def desk_and_calls():
+    calls = []
+    opened = []
+
+    async def place(a):
+        calls.append(a.id)
+        if a.summary.total == -1:
+            raise RuntimeError("Not ordered: order total changed")
+        return "113-0000000-0000000"
+
+    desk = Desk(place, asyncio.get_running_loop(), open_page=opened.append)
+    yield desk, calls, opened
+    desk.close()
+
+
+async def post(desk, a, decision, nonce=None, origin=None):
+    return await asyncio.to_thread(
+        fetch,
+        f"{desk.base}/a/{a.id}/decide",
+        {"n": nonce or a.nonce, "decision": decision},
+        origin or desk.base,
+    )
+
+
+async def settle(desk, a):
+    for _ in range(50):
+        if desk.get(a.id).status != "placing":
+            return
+        await asyncio.sleep(0.02)
+
+
+async def test_page_opens_in_browser_and_shows_summary(desk_and_calls):
+    desk, _, opened = desk_and_calls
+    a = desk.create(SUMMARY, b"png")
+    assert opened == [desk.url(a)]
+    code, page = await asyncio.to_thread(fetch, desk.url(a))
+    assert code == 200
+    assert "$16.07" in page and "Place order" in page and "Don't buy" in page
+    assert "Keurig" in page and "Visa 0000" in page
+
+
+async def test_amazon_text_is_escaped(desk_and_calls):
+    desk, _, _ = desk_and_calls
+    evil = parse.CheckoutSummary(
+        ["<script>alert(1)</script>"], {"Order total:": 1.0}, 1.0, "x", "y", "z", True
+    )
+    a = desk.create(evil, b"")
+    _, page = await asyncio.to_thread(fetch, desk.url(a))
+    assert "<script>alert(1)" not in page and "&lt;script&gt;" in page
+
+
+async def test_wrong_nonce_is_refused(desk_and_calls):
+    desk, calls, _ = desk_and_calls
+    a = desk.create(SUMMARY, b"")
+    code, _ = await asyncio.to_thread(fetch, f"{desk.base}/a/{a.id}?n=wrong")
+    assert code == 403
+    code, _ = await post(desk, a, "approve", nonce="wrong")
+    assert code == 403 and calls == [] and desk.get(a.id).status == "pending"
+
+
+async def test_cross_site_post_is_refused(desk_and_calls):
+    desk, calls, _ = desk_and_calls
+    a = desk.create(SUMMARY, b"")
+    code, _ = await post(desk, a, "approve", origin="https://evil.example")
+    assert code == 403 and calls == []
+
+
+async def test_approve_places_once(desk_and_calls):
+    desk, calls, _ = desk_and_calls
+    a = desk.create(SUMMARY, b"")
+    code, _ = await post(desk, a, "approve")
+    assert code == 303
+    await settle(desk, a)
+    assert (
+        desk.get(a.id).status == "placed"
+        and desk.get(a.id).order_number == "113-0000000-0000000"
+    )
+    code, _ = await post(desk, a, "approve")
+    assert code == 409 and calls == [a.id]
+    _, page = await asyncio.to_thread(fetch, desk.url(a))
+    assert "Order placed" in page and "113-0000000-0000000" in page
+
+
+async def test_reject_never_places(desk_and_calls):
+    desk, calls, _ = desk_and_calls
+    a = desk.create(SUMMARY, b"")
+    assert (await post(desk, a, "reject"))[0] == 303
+    assert desk.get(a.id).status == "rejected"
+    assert (await post(desk, a, "approve"))[0] == 409
+    assert calls == []
+
+
+async def test_expired_cannot_be_approved(desk_and_calls):
+    desk, calls, _ = desk_and_calls
+    desk._ttl = 0
+    a = desk.create(SUMMARY, b"")
+    await asyncio.sleep(0.01)
+    assert (await post(desk, a, "approve"))[0] == 409
+    assert desk.get(a.id).status == "expired" and calls == []
+
+
+async def test_newer_request_supersedes_older(desk_and_calls):
+    desk, calls, _ = desk_and_calls
+    old = desk.create(SUMMARY, b"")
+    new = desk.create(SUMMARY, b"")
+    assert desk.get(old.id).status == "superseded"
+    assert (await post(desk, old, "approve"))[0] == 409
+    assert desk.get(new.id).status == "pending" and calls == []
+
+
+async def test_place_failure_is_reported(desk_and_calls):
+    desk, _, _ = desk_and_calls
+    bad = parse.CheckoutSummary(["x"], {}, -1, "a", "b", "c", True)
+    a = desk.create(bad, b"")
+    await post(desk, a, "approve")
+    await settle(desk, a)
+    got = desk.get(a.id)
+    assert got.status == "failed" and "total changed" in got.detail

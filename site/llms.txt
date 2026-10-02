@@ -1,0 +1,20 @@
+# CartClaw
+
+> CartClaw is a free, open-source (MIT) MCP server that lets an AI agent such as Claude Code use the user's own Amazon account from their own machine. The agent can read orders and return deadlines, look up products and change the cart. It cannot buy: purchases happen only when the human clicks Place order on a local approval page, after CartClaw re-checks the total, items, address and card.
+
+- Source and install: https://github.com/ucsandman/cartclaw
+- Site: https://cartclaw.dev/
+
+## Tools
+
+- orders: order history with each item's return window
+- returnable_items: items still returnable, soonest deadline first
+- product: title, price and availability for an ASIN
+- cart, cart_add, cart_remove: read and change the cart
+- checkout_request: opens Amazon's checkout review (places nothing) and an approval page for the human
+- checkout_status: pending, placed (with order number), rejected, expired, superseded or failed
+
+## Notes
+
+- Runs locally in a separate browser window with its own profile; nothing is hosted and the Amazon session never leaves the machine.
+- amazon.com (US) only. Not affiliated with Amazon.

@@ -1,0 +1,269 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CartClaw: AI shopping assistant and Amazon MCP server</title>
+<meta name="description" content="Local Amazon MCP server for Claude. Your AI shopping assistant reads orders and return deadlines and fills your cart. Nothing is ordered until you approve.">
+<link rel="canonical" href="https://cartclaw.dev/">
+<meta property="og:type" content="website">
+<meta property="og:title" content="CartClaw: AI shopping assistant and Amazon MCP server">
+<meta property="og:description" content="Your agent shops your Amazon account. You approve every purchase. Runs locally, free and open source.">
+<meta property="og:url" content="https://cartclaw.dev/">
+<meta property="og:image" content="https://cartclaw.dev/og.png?v=1">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="CartClaw: AI shopping assistant and Amazon MCP server">
+<meta name="twitter:description" content="Your agent shops your Amazon account. You approve every purchase.">
+<meta name="twitter:image" content="https://cartclaw.dev/og.png?v=1">
+<meta name="theme-color" content="#14532d">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+<script defer src="/_vercel/insights/script.js"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:wght@400;500;700;900&display=swap" rel="stylesheet">
+<style>
+:root{
+  --paper:#f6f5f2; --panel:#ffffff; --ink:#18211b; --muted:#5d655f; --rule:#d9d6cd;
+  --green:#14532d; --green-ink:#ffffff; --tint:#e8efe9; --code-bg:#18211b; --code-ink:#e9efe9; --code-dim:#8fa396;
+  --font:"Schibsted Grotesk",system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+  --mono:ui-monospace,"Cascadia Code",Consolas,Menlo,monospace;
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    --paper:#0e1410; --panel:#161e18; --ink:#e9eee9; --muted:#9aa59d; --rule:#2a352d;
+    --green:#5fbf84; --green-ink:#08150d; --tint:#17261c; --code-bg:#070b08; --code-ink:#e9efe9; --code-dim:#7f9486;
+  }
+}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--paper);color:var(--ink);font:400 17px/1.55 var(--font);overflow-x:hidden}
+a{color:inherit}
+:focus-visible{outline:3px solid var(--green);outline-offset:3px;border-radius:4px}
+.wrap{max-width:1120px;margin:0 auto;padding:0 16px}
+@media(min-width:720px){.wrap{padding:0 32px}}
+
+/* header */
+header.top{display:flex;align-items:center;justify-content:space-between;padding:20px 0}
+.brand{font-weight:900;font-size:21px;letter-spacing:-.02em;text-decoration:none}
+.brand b{color:var(--green)}
+header nav{display:flex;gap:20px;font-size:15px}
+header nav a{text-decoration:none;color:var(--muted)}
+header nav a:hover{color:var(--ink)}
+@media(max-width:560px){header nav a:not(.gh){display:none}}
+
+/* hero */
+.hero{display:grid;gap:40px;padding:32px 0 72px;align-items:start}
+@media(min-width:900px){.hero{grid-template-columns:1fr 1fr;gap:56px;padding:56px 0 96px}}
+h1{font-weight:900;font-size:clamp(36px,5.4vw,66px);line-height:1;letter-spacing:-.035em;margin:0 0 24px}
+.lede{font-size:clamp(18px,2.2vw,22px);line-height:1.45;max-width:34em;margin:0 0 28px}
+.cta{display:flex;flex-wrap:wrap;gap:12px;align-items:center;margin-bottom:20px}
+.btn{display:inline-block;padding:14px 22px;border-radius:10px;font-weight:700;text-decoration:none;font-size:16px;border:2px solid var(--green)}
+.btn.primary{background:var(--green);color:var(--green-ink)}
+.btn.ghost{background:transparent;color:var(--ink);border-color:var(--rule)}
+.btn:hover{filter:brightness(1.08)}
+.fine{font-size:14px;color:var(--muted);margin:0}
+.shot{position:relative;margin:0}
+.shot img{display:block;width:100%;height:auto;border-radius:14px;border:1px solid var(--rule);box-shadow:0 0 0 6px var(--tint),0 30px 60px -30px rgba(10,30,15,.45)}
+.shot figcaption{font-size:14px;color:var(--muted);margin-top:12px}
+
+
+/* sections */
+section{padding:72px 0;border-top:1px solid var(--rule)}
+@media(max-width:600px){section{padding:56px 0}}
+h2{font-weight:900;font-size:clamp(30px,4.6vw,46px);line-height:1.05;letter-spacing:-.03em;margin:0 0 16px;max-width:18em}
+.intro{max-width:36em;color:var(--muted);margin:0 0 40px;font-size:18px}
+h3{font-size:19px;margin:0 0 6px;letter-spacing:-.01em}
+p{margin:0 0 12px}
+code{font-family:var(--mono);font-size:.88em;background:var(--tint);padding:2px 6px;border-radius:5px}
+
+/* steps: a real sequence */
+ol.steps{list-style:none;margin:0;padding:0;counter-reset:s;max-width:44em}
+ol.steps li{counter-increment:s;position:relative;padding:0 0 28px 56px}
+ol.steps li::before{content:counter(s);position:absolute;left:0;top:0;width:36px;height:36px;border-radius:50%;background:var(--green);color:var(--green-ink);font-weight:700;display:grid;place-items:center}
+ol.steps li::after{content:"";position:absolute;left:17px;top:42px;bottom:6px;width:2px;background:var(--rule)}
+ol.steps li:last-child{padding-bottom:0}
+ol.steps li:last-child::after{display:none}
+ol.steps li p{margin:0;color:var(--muted)}
+ol.steps li h3{margin-top:4px}
+.callout{margin-top:36px;padding:18px 20px;border-left:4px solid var(--green);background:var(--tint);max-width:44em;border-radius:0 8px 8px 0}
+.callout p{margin:0}
+
+/* tools */
+.tools{display:grid;gap:0;border-top:2px solid var(--ink)}
+.tool{display:grid;gap:4px 24px;padding:16px 0;border-bottom:1px solid var(--rule)}
+@media(min-width:720px){.tool{grid-template-columns:230px 1fr;align-items:baseline}}
+.tool code{justify-self:start;font-weight:600}
+.tool span{color:var(--ink)}
+.tool.none{background:var(--tint);padding:16px 14px;border-bottom:0;margin-top:0}
+.tool.none code{background:transparent;text-decoration:line-through;text-decoration-thickness:2px;color:var(--muted)}
+
+/* trust */
+.cols{display:grid;gap:36px 56px}
+@media(min-width:760px){.cols{grid-template-columns:1fr 1fr}}
+.cols p{color:var(--muted)}
+.cols h3{color:var(--ink)}
+
+/* install */
+pre{margin:0;background:var(--code-bg);color:var(--code-ink);border-radius:12px;padding:20px;overflow-x:auto;font:400 15px/1.7 var(--mono);max-width:100%}
+pre .c{color:var(--code-dim)}
+.install-grid{display:grid;gap:28px}
+.reqs{color:var(--muted);margin-top:20px}
+
+/* pricing */
+.plans{display:grid;gap:20px}
+@media(min-width:760px){.plans{grid-template-columns:1fr 1fr}}
+.plan{border:1px solid var(--rule);border-radius:14px;padding:28px;background:var(--panel)}
+.plan.free{border:2px solid var(--green)}
+.plan h3{font-size:26px;font-weight:900;letter-spacing:-.02em;margin-bottom:4px}
+.plan .tag{color:var(--muted);margin-bottom:18px}
+.plan ul{margin:0 0 20px;padding-left:20px}
+.plan li{margin-bottom:6px}
+form.wait{display:flex;flex-wrap:wrap;gap:10px}
+form.wait input{flex:1 1 200px;min-width:0;padding:13px 14px;border-radius:10px;border:1px solid var(--rule);background:var(--paper);color:var(--ink);font:inherit}
+form.wait button{padding:13px 20px;border-radius:10px;border:2px solid var(--green);background:var(--green);color:var(--green-ink);font:700 16px var(--font);cursor:pointer}
+
+/* faq */
+.faq{max-width:760px;border-top:2px solid var(--ink)}
+details{border-bottom:1px solid var(--rule);padding:18px 0}
+summary{cursor:pointer;font-weight:700;font-size:18px;list-style:none;display:flex;justify-content:space-between;gap:16px}
+summary::-webkit-details-marker{display:none}
+summary::after{content:"+";font-weight:400;font-size:24px;line-height:1;color:var(--green)}
+details[open] summary::after{content:"\2212"}
+details p{margin:12px 0 0;color:var(--muted);max-width:40em}
+
+footer{border-top:1px solid var(--rule);padding:36px 0 56px;color:var(--muted);font-size:14px}
+footer p{margin:0 0 6px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <a class="brand" href="#top">Cart<b>Claw</b></a>
+    <nav aria-label="Main">
+      <a href="#how">How buying works</a>
+      <a href="#install">Install</a>
+      <a href="#pricing">Pricing</a>
+      <a href="#faq">FAQ</a>
+      <a class="gh" href="https://github.com/ucsandman/cartclaw">GitHub</a>
+    </nav>
+  </header>
+
+  <main id="top">
+    <div class="hero">
+      <div>
+        <h1>Your AI agent shops your Amazon account. You approve every purchase.</h1>
+        <p class="lede">CartClaw is a local MCP server for Claude Code and other MCP clients. Your agent checks orders, finds returns and fills the cart. Buying takes one click from you.</p>
+        <div class="cta">
+          <a class="btn primary" href="#install">Install in 2 steps</a>
+          <a class="btn ghost" href="https://github.com/ucsandman/cartclaw">GitHub</a>
+        </div>
+        <p class="fine">Free and open source. Runs on your machine. amazon.com (US) only for now.</p>
+      </div>
+      <figure class="shot">
+        <img src="/approval.png" width="1240" height="1664" alt="CartClaw approval page asking Approve this Amazon order, showing a $16.07 total, the item, delivery address, card, delivery date, and two buttons: Place order and Don't buy.">
+        <figcaption>The approval page, with sample data. This click is the only way an order gets placed.</figcaption>
+      </figure>
+    </div>
+
+    <section id="how">
+      <h2>How buying works</h2>
+      <p class="intro">The agent can ask to buy. It can't buy. Here's what happens when it asks.</p>
+      <ol class="steps">
+        <li><h3>The agent calls checkout_request</h3><p>It tells CartClaw what's in the cart and that it wants to check out.</p></li>
+        <li><h3>CartClaw opens Amazon's checkout review</h3><p>In its own browser window. This step places nothing.</p></li>
+        <li><h3>An approval page opens in your normal browser</h3><p>It shows the total, items, address, card, delivery date and a screenshot of Amazon's page.</p></li>
+        <li><h3>You click Place order or Don't buy</h3><p>Requests expire after 15 minutes. A newer request replaces an older one.</p></li>
+        <li><h3>CartClaw checks again, then orders</h3><p>It reloads checkout and confirms the total, items, address and card still match what you saw. If anything changed, nothing is ordered.</p></li>
+      </ol>
+    </section>
+
+    <section id="tools">
+      <h2>What your agent can do</h2>
+      <p class="intro">Eight tools. None of them can buy.</p>
+      <div class="tools">
+        <div class="tool"><code>orders</code><span>Your order history, with each item's return window.</span></div>
+        <div class="tool"><code>returnable_items</code><span>What you can still return, soonest deadline first.</span></div>
+        <div class="tool"><code>product</code><span>Title, price and availability for any ASIN.</span></div>
+        <div class="tool"><code>cart</code><span>What's in your cart right now.</span></div>
+        <div class="tool"><code>cart_add</code><span>Put an item in the cart.</span></div>
+        <div class="tool"><code>cart_remove</code><span>Take an item out.</span></div>
+        <div class="tool"><code>checkout_request</code><span>Ask to buy. Opens the approval page for you. Places nothing.</span></div>
+        <div class="tool"><code>checkout_status</code><span>Did you approve, decline, or let it expire?</span></div>
+        <div class="tool none"><code>place_order</code><span>Doesn't exist. Only the button on the approval page places an order.</span></div>
+      </div>
+    </section>
+
+    <section id="trust">
+      <h2>Your account stays on your computer</h2>
+      <div class="cols">
+        <div><h3>A separate browser window</h3><p>CartClaw drives its own window with its own profile. You sign in to Amazon once. Your everyday browser isn't touched.</p></div>
+        <div><h3>Nothing leaves your machine</h3><p>Your password and session never leave your computer. There's no CartClaw server. Nothing is hosted.</p></div>
+        <div><h3>Fixed actions, not guesses</h3><p>A generic browser agent has a model decide every click. CartClaw's actions are fixed code, so they're fast and predictable.</p></div>
+        <div><h3>A person gates the money</h3><p>Buying needs a human click on a page showing exactly what you're paying for.</p></div>
+      </div>
+      <div class="callout"><p>Why drive a browser at all? Amazon has no shopping API for buyers. The old Product Advertising API was shut down on 2026-05-15.</p></div>
+    </section>
+
+    <section id="install">
+      <h2>Install in two steps</h2>
+      <div class="install-grid">
+<pre><span class="c"># 1. Sign in to Amazon once. A window opens.</span>
+<span class="c">#    Tick "Keep me signed in".</span>
+uvx --from git+https://github.com/ucsandman/cartclaw cartclaw login
+
+<span class="c"># 2. Add it to Claude Code</span>
+claude mcp add --scope user cartclaw -- uvx --from git+https://github.com/ucsandman/cartclaw cartclaw</pre>
+      </div>
+      <p class="reqs">Needs <a href="https://docs.astral.sh/uv/">uv</a>, git, and Brave, Chrome, Edge or Chromium. Other MCP clients can run the same uvx command as a local stdio server.</p>
+    </section>
+
+    <section id="pricing">
+      <h2>Free core. Pro is coming.</h2>
+      <p class="intro">The core is MIT licensed and stays free.</p>
+      <div class="plans">
+        <div class="plan free">
+          <h3>Free</h3>
+          <p class="tag">Open source, MIT</p>
+          <ul>
+            <li>All eight tools</li>
+            <li>The approval page</li>
+            <li>Runs locally, nothing hosted</li>
+          </ul>
+          <a class="btn primary" href="https://github.com/ucsandman/cartclaw">GitHub</a>
+        </div>
+        <div class="plan">
+          <h3>Pro</h3>
+          <p class="tag">Coming. Join the waitlist.</p>
+          <ul>
+            <li>Returns autopilot: starts returns and picks the drop-off for you</li>
+            <li>Approve purchases from your phone</li>
+          </ul>
+          <form class="wait" method="post" action="/api/waitlist">
+            <input type="email" name="email" required maxlength="254" placeholder="you@example.com" aria-label="Email address" autocomplete="email">
+            <input type="text" name="company" tabindex="-1" autocomplete="off" aria-hidden="true" style="position:absolute;left:-9999px">
+            <button type="submit">Join waitlist</button>
+          </form>
+          <p class="fine" style="margin-top:10px">One email when Pro ships. Nothing else.</p>
+        </div>
+      </div>
+    </section>
+
+    <section id="faq">
+      <h2>Questions</h2>
+      <div class="faq">
+        <details><summary>Is this allowed by Amazon?</summary><p>You're the one using your own account. Automating it may break Amazon's Conditions of Use, and Amazon can act on accounts. CartClaw keeps you in control and runs only on your machine.</p></details>
+        <details><summary>Can the agent buy without me?</summary><p>No. There's no buy tool. Only the Place order button on the approval page places an order.</p></details>
+        <details><summary>Does my password leave my computer?</summary><p>No.</p></details>
+        <details><summary>Which agents work?</summary><p>Claude Code, and any MCP client that runs local stdio servers.</p></details>
+        <details><summary>What if Amazon changes its pages?</summary><p>The tools say what they couldn't read instead of guessing.</p></details>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <p>CartClaw is not affiliated with or endorsed by Amazon. Amazon is a trademark of Amazon.com, Inc.</p>
+    <p><a href="https://github.com/ucsandman/cartclaw">Source on GitHub</a> &middot; MIT license &middot; Made by Practical Systems</p>
+  </footer>
+</div>
+</body>
+</html>

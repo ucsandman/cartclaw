@@ -1,0 +1,33 @@
+[project]
+name = "cartclaw"
+version = "0.1.0"
+description = "Let your AI agent shop your own Amazon account. It buys only after you click Approve."
+readme = "README.md"
+license = "MIT"
+keywords = ["mcp", "amazon", "shopping", "agent", "approval"]
+authors = [
+    { name = "Wes Sander", email = "sandman.uc@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "amazon-orders>=4.6",
+    "mcp>=2.2",
+    "playwright>=1.58",
+]
+
+[project.scripts]
+cartclaw = "cartclaw:main"
+
+[build-system]
+requires = ["uv_build>=0.9.26,<0.10.0"]
+build-backend = "uv_build"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "pytest-asyncio>=1.4.0",
+]

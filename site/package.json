@@ -1,0 +1,9 @@
+{
+  "name": "cartclaw-site",
+  "private": true,
+  "type": "module",
+  "description": "Marketing site for CartClaw, the approval-gated Amazon MCP server.",
+  "dependencies": {
+    "@vercel/blob": "^2.8.0"
+  }
+}
