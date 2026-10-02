@@ -24,8 +24,8 @@ There is no tool that places an order.
 
 1. The agent fills the cart and calls `checkout_request`.
 2. The server opens Amazon's checkout review page in its window and reads the total, items, address, card and delivery date. Nothing is placed.
-3. An approval page opens in your normal browser with those details, a screenshot of Amazon's page, and two buttons: **Place order** and **Don't buy**.
-4. If you click **Place order**, the server reloads checkout, checks that the total, items, address and card still match what you saw, and only then clicks Amazon's "Place your order". If anything changed, nothing is ordered.
+3. An approval page opens in your normal browser with those details, a screenshot of Amazon's page, and two buttons: **Place order** and **Don't buy**. If the card is wrong, pick another saved card and click **Use this card**: the server switches it on Amazon's checkout and the page shows the new total.
+4. If you click **Place order**, the server reloads checkout, switches back to the card you approved (Amazon puts its default card back whenever checkout reopens), checks that the total, items, address and card still match what you saw, and only then clicks Amazon's "Place your order". If anything changed, nothing is ordered.
 5. The request expires after 15 minutes. A newer request replaces an older one.
 
 ## Setup
@@ -60,6 +60,7 @@ Site operations (2026-10-02):
 
 - amazon.com (US) only.
 - Returns: return deadlines are read, but starting a return is not built yet.
+- The approval page lists saved cards only. To pay with a bank account or gift card balance, select it in the Amazon window first.
 - The approval gate stops the agent from buying through this server. It is not a sandbox: an agent with shell access to your machine could drive the browser's control port directly.
 - Automating your account may break Amazon's Conditions of Use. You are the one accessing your account, but Amazon can still act on it.
 - Amazon changes its pages. When a parser breaks, the tool says what it could not read instead of guessing.

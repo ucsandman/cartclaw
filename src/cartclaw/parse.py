@@ -210,6 +210,39 @@ def parse_checkout(html: str) -> CheckoutSummary:
     )
 
 
+@dataclass
+class PaymentOption:
+    label: str  # "Visa ending in 0000", as Amazon's payment page names it
+    last4: str
+    expired: bool
+
+
+def parse_payment_options(html: str) -> list[PaymentOption]:
+    """Saved cards on Amazon's checkout payment page. Bank accounts and loans have no
+    four-digit 'ending in' label and are left out."""
+    found = []
+    for radio in _soup(html).select(
+        'input[type=radio][name="ppw-instrumentRowSelection"]'
+    ):
+        label = _text(radio.find_parent(class_="pmts-instrument-selector"))
+        m = re.search(r"ending in (\d{4})\b", label)
+        if m:
+            expired = "isExpired=true" in (radio.get("value") or "")
+            found.append(PaymentOption(label, m.group(1), expired))
+    return found
+
+
+def payment_page_href(html: str) -> str | None:
+    """The checkout page's link to Amazon's payment page."""
+    a = _soup(html).select_one('a[aria-label="Change payment method"]')
+    return a.get("href") if a else None
+
+
+def card_last4(paying_with: str) -> str | None:
+    m = re.search(r"(\d{4})\s*$", paying_with or "")
+    return m.group(1) if m else None
+
+
 def summaries_match(approved: CheckoutSummary, current: CheckoutSummary) -> str | None:
     """None when the order about to be placed is the one the human approved, else the reason."""
     if current.total is None or current.total != approved.total:

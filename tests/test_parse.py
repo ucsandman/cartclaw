@@ -110,6 +110,28 @@ def test_summaries_unreadable_total_blocks():
     assert parse.summaries_match(approved, current)
 
 
+def test_payment_options_fixture():
+    cards = parse.parse_payment_options(html("pay"))
+    assert [(c.label, c.last4, c.expired) for c in cards] == [
+        ("Visa ending in 0000", "0000", False),
+        ("Discover ending in 1111", "1111", False),
+        ("Visa ending in 2222", "2222", True),
+    ]
+
+
+def test_payment_page_href():
+    page = '<a aria-label="Change payment method" href="/checkout/p/p-1/pay?referrer=spc">Change</a>'
+    assert parse.payment_page_href(page) == "/checkout/p/p-1/pay?referrer=spc"
+    assert (
+        parse.payment_page_href(html("checkout").replace("Change payment", "")) is None
+    )
+
+
+def test_card_last4():
+    assert parse.card_last4("Visa 0000") == "0000"
+    assert parse.card_last4("Gift card balance") is None
+
+
 def test_signin_and_captcha_detection():
     assert parse.is_signin("https://www.amazon.com/ap/signin?openid.return_to=x")
     assert not parse.is_signin("https://www.amazon.com/your-orders/orders")

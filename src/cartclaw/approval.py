@@ -13,12 +13,13 @@ import sys
 import threading
 import time
 import webbrowser
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Awaitable, Callable
 from urllib.parse import parse_qs, urlparse
 
-from .parse import CheckoutSummary
+from . import parse
+from .parse import CheckoutSummary, PaymentOption
 
 TTL_SECONDS = 15 * 60
 
@@ -28,16 +29,20 @@ class Approval:
     id: str
     nonce: str
     summary: CheckoutSummary
-    screenshot: bytes
+    screenshot: bytes | None
     created: float
-    status: str = (
-        "pending"  # pending, placing, placed, rejected, expired, superseded, failed
-    )
+    status: str = "pending"  # pending, switching, placing, placed, rejected, expired, superseded, failed
     detail: str = ""
     order_number: str | None = None
+    cards: list[PaymentOption] = field(default_factory=list)
 
 
 PlaceFn = Callable[[Approval], Awaitable[str | None]]
+# Switch the order to the card with these last 4 digits and read checkout again.
+ChangeCardFn = Callable[
+    [Approval, str],
+    Awaitable[tuple[CheckoutSummary, bytes | None, list[PaymentOption]]],
+]
 
 
 class Desk:
@@ -47,8 +52,10 @@ class Desk:
         loop: asyncio.AbstractEventLoop,
         ttl: float = TTL_SECONDS,
         open_page: Callable[[str], object] = webbrowser.open,
+        change_card: ChangeCardFn | None = None,
     ) -> None:
         self._place, self._loop, self._ttl, self._open = place, loop, ttl, open_page
+        self._change_card = change_card
         self._approvals: dict[str, Approval] = {}
         self._lock = threading.Lock()
         self._server: ThreadingHTTPServer | None = None
@@ -69,7 +76,12 @@ class Desk:
     def url(self, a: Approval) -> str:
         return f"{self.base}/a/{a.id}?n={a.nonce}"
 
-    def create(self, summary: CheckoutSummary, screenshot: bytes) -> Approval:
+    def create(
+        self,
+        summary: CheckoutSummary,
+        screenshot: bytes | None,
+        cards: list[PaymentOption] | None = None,
+    ) -> Approval:
         self.start()
         a = Approval(
             secrets.token_urlsafe(9),
@@ -77,11 +89,12 @@ class Desk:
             summary,
             screenshot,
             time.time(),
+            cards=cards or [],
         )
         with self._lock:
             # One cart, so only the newest request can be approved.
             for old in self._approvals.values():
-                if old.status == "pending":
+                if old.status in ("pending", "switching"):
                     old.status = "superseded"
             self._approvals[a.id] = a
         print(f"cartclaw: approval page {self.url(a)}", file=sys.stderr)
@@ -110,6 +123,32 @@ class Desk:
             a.status = "placing"
         asyncio.run_coroutine_threadsafe(self._run_place(a), self._loop)
         return 200, "placing"
+
+    def switch_card(self, approval_id: str, nonce: str, last4: str) -> tuple[int, str]:
+        a = self.get(approval_id)
+        if not a or not secrets.compare_digest(a.nonce, nonce):
+            return 403, "This approval link is not valid."
+        with self._lock:
+            if a.status != "pending":
+                return 409, f"This request is already {a.status}."
+            if not self._change_card or last4 not in {c.last4 for c in a.cards}:
+                return 400, "That card is not one of your saved cards."
+            a.status, a.detail = "switching", ""
+        asyncio.run_coroutine_threadsafe(self._run_switch(a, last4), self._loop)
+        return 200, "switching"
+
+    async def _run_switch(self, a: Approval, last4: str) -> None:
+        result, detail = None, ""
+        try:
+            result = await self._change_card(a, last4)
+        except Exception as e:  # shown on the page; the order keeps the card it had
+            detail = f"Card not changed: {str(e) or type(e).__name__}"
+        with self._lock:
+            if a.status != "switching":  # a newer request superseded it
+                return
+            if result:
+                a.summary, a.screenshot, a.cards = result
+            a.status, a.detail, a.created = "pending", detail, time.time()
 
     async def _run_place(self, a: Approval) -> None:
         try:
@@ -162,6 +201,8 @@ def _handler(desk: Desk) -> type[BaseHTTPRequestHandler]:
                     _page("Link not valid", "<p>This approval link is not valid.</p>"),
                 )
             if sub == "shot.png":
+                if not a.screenshot:
+                    return self._send(404, b"", "image/png")
                 return self._send(200, a.screenshot, "image/png")
             if sub == "status":
                 body = json.dumps(
@@ -184,10 +225,17 @@ def _handler(desk: Desk) -> type[BaseHTTPRequestHandler]:
             parts = urlparse(self.path).path.strip("/").split("/")
             length = int(self.headers.get("Content-Length") or 0)
             form = parse_qs(self.rfile.read(length).decode())
-            if len(parts) != 3 or parts[0] != "a" or parts[2] != "decide":
+            if len(parts) != 3 or parts[0] != "a" or parts[2] not in ("decide", "card"):
                 return self._send(404, _page("Not found", "<p>Not found.</p>"))
             nonce = (form.get("n") or [""])[0]
-            code, msg = desk.decide(parts[1], nonce, (form.get("decision") or [""])[0])
+            if parts[2] == "card":
+                code, msg = desk.switch_card(
+                    parts[1], nonce, (form.get("card") or [""])[0]
+                )
+            else:
+                code, msg = desk.decide(
+                    parts[1], nonce, (form.get("decision") or [""])[0]
+                )
             if code != 200:
                 return self._send(code, _page("Not done", f"<p>{html.escape(msg)}</p>"))
             self.send_response(303)
@@ -215,6 +263,7 @@ dl{display:grid;grid-template-columns:auto 1fr;gap:6px 16px;margin:16px 0 0;font
 button{font:inherit;font-weight:600;border-radius:10px;padding:12px 18px;cursor:pointer;border:1px solid var(--line);background:var(--card);color:var(--ink)}
 button.go{background:var(--go);color:var(--go-ink);border-color:var(--go);flex:1}
 .note{font-size:13px;color:var(--muted);margin-top:14px}
+.pick{display:flex;gap:8px;margin-top:8px;flex-wrap:wrap}.pick select{font:inherit;padding:8px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:var(--ink);flex:1 1 180px;min-width:0}.pick button{padding:8px 12px}
 .state{font-size:20px;font-weight:700;margin:0 0 6px}.bad{color:var(--warn)}
 details{margin-top:18px}summary{cursor:pointer;color:var(--muted);font-size:14px}details img{width:100%;margin-top:10px;border:1px solid var(--line);border-radius:8px}
 """
@@ -242,11 +291,27 @@ def render(a: Approval, url: str) -> bytes:
         f"<td>{_money(v)}</td></tr>"
         for k, v in s.lines.items()
     )
+    pick = ""
+    if a.status == "pending" and len(a.cards) > 1:
+        current = parse.card_last4(s.paying_with)
+        options = "".join(
+            f'<option value="{e(c.last4)}"{" selected" if c.last4 == current else ""}>{e(c.label)}</option>'
+            for c in a.cards
+        )
+        pick = (
+            f'<form class="pick" method="post" action="/a/{e(a.id)}/card"><input type="hidden" name="n" value="{e(a.nonce)}">'
+            f'<select name="card" aria-label="Card">{options}</select><button>Use this card</button></form>'
+        )
     facts = (
-        f"<dl><dt>Deliver to</dt><dd>{e(s.deliver_to)}</dd><dt>Pay with</dt><dd>{e(s.paying_with)}</dd>"
+        f"<dl><dt>Deliver to</dt><dd>{e(s.deliver_to)}</dd><dt>Pay with</dt><dd>{e(s.paying_with)}{pick}</dd>"
         f"<dt>Delivery</dt><dd>{e(s.arriving)}</dd></dl>"
     )
-    shot = f'<details><summary>Amazon\'s checkout page, as captured</summary><img src="{e(url.replace("?", "/shot.png?", 1))}" alt="Amazon checkout page screenshot"></details>'
+    problem = f'<p class="note bad">{e(a.detail)}</p>' if a.detail else ""
+    shot = (
+        f'<details><summary>Amazon\'s checkout page, as captured</summary><img src="{e(url.replace("?", "/shot.png?", 1))}" alt="Amazon checkout page screenshot"></details>'
+        if a.screenshot
+        else ""
+    )
     head = '<div class="tag">CartClaw</div>'
     if a.status == "pending":
         minutes = max(1, int((a.created + TTL_SECONDS - time.time()) // 60))
@@ -258,12 +323,17 @@ def render(a: Approval, url: str) -> bytes:
         body = (
             f'{head}<h1>Approve this Amazon order?</h1><p class="lede">Your agent asked to buy this. '
             f'Nothing is ordered until you click Place order.</p><div class="card"><p class="total">{_money(s.total)}</p>'
-            f'<ul class="items">{items}</ul><table>{rows}</table>{facts}{form}'
+            f'<ul class="items">{items}</ul><table>{rows}</table>{facts}{problem}{form}'
             f'<p class="note">This request expires in {minutes} min. The order is checked again right before it is placed; '
             f"if the total, items, address or card changed, nothing is ordered.</p></div>{shot}"
         )
         return _page(f"Approve {_money(s.total)} order", body)
     states = {
+        "switching": (
+            "Switching card…",
+            "Amazon is changing the card on this order. This page updates by itself.",
+            False,
+        ),
         "placing": (
             "Placing your order…",
             "Keep this page open; it updates by itself.",
@@ -294,4 +364,4 @@ def render(a: Approval, url: str) -> bytes:
         f'{head}<p class="state{" bad" if bad else ""}">{title}</p><p class="lede">{text}</p>'
         f'<div class="card"><p class="total">{_money(s.total)}</p><ul class="items">{items}</ul>{facts}</div>'
     )
-    return _page(title, body, refresh=a.status == "placing")
+    return _page(title, body, refresh=a.status in ("placing", "switching"))

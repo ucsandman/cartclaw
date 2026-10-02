@@ -47,7 +47,10 @@ def _desk_for_loop() -> Desk:
         async def place(a: Approval) -> str | None:
             return await amazon.place_order(session, a.summary)
 
-        _desk = Desk(place, asyncio.get_running_loop())
+        async def change_card(a: Approval, last4: str):
+            return await amazon.checkout_preview(session, card=last4)
+
+        _desk = Desk(place, asyncio.get_running_loop(), change_card=change_card)
     return _desk
 
 
@@ -59,6 +62,7 @@ def _approval_view(a: Approval) -> dict[str, Any]:
         "order_number": a.order_number,
         "total": a.summary.total,
         "items": a.summary.items,
+        "paying_with": a.summary.paying_with,
     }
 
 
@@ -109,8 +113,8 @@ async def checkout_request() -> dict[str, Any]:
     """Ask the user to approve buying the current cart. Opens Amazon's checkout review (nothing is
     placed), then an approval page in the user's browser showing total, items, address and card.
     Returns at once with status 'pending'; poll checkout_status. The user can approve or decline."""
-    summary, shot = await _run(amazon.checkout_preview(session))
-    a = _desk_for_loop().create(summary, shot)
+    summary, shot, cards = await _run(amazon.checkout_preview(session))
+    a = _desk_for_loop().create(summary, shot, cards)
     view = _approval_view(a)
     view["next"] = (
         "Tell the user an approval page opened in their browser for "
@@ -121,8 +125,8 @@ async def checkout_request() -> dict[str, Any]:
 
 @mcp.tool(annotations=READ)
 async def checkout_status(approval_id: str) -> dict[str, Any]:
-    """Where an approval stands: pending, placing, placed (with order_number), rejected, expired,
-    superseded or failed (with detail)."""
+    """Where an approval stands: pending, switching (the user is changing the card), placing,
+    placed (with order_number), rejected, expired, superseded or failed (with detail)."""
     a = _desk.get(approval_id) if _desk else None
     if not a:
         raise ToolError(f"No approval {approval_id} in this session.")

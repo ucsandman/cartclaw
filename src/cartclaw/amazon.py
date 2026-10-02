@@ -156,23 +156,96 @@ async def cart_remove(session: Session, asin: str) -> parse.Cart:
         return result
 
 
-async def checkout_preview(session: Session) -> tuple[parse.CheckoutSummary, bytes]:
-    """Open Amazon's checkout review page and read it. Places nothing."""
+async def _screenshot(page: Page) -> bytes | None:
+    """Chromium draws nothing while its window is minimized, so a screenshot would wait forever.
+    Restore the window for the capture, minimize it again, and go without a picture if it still fails.
+    """
+    cdp = await page.context.new_cdp_session(page)
+    try:
+        win = await cdp.send("Browser.getWindowForTarget")
+        minimized = win["bounds"].get("windowState") == "minimized"
+
+        async def set_state(state: str) -> None:
+            await cdp.send(
+                "Browser.setWindowBounds",
+                {"windowId": win["windowId"], "bounds": {"windowState": state}},
+            )
+
+        if minimized:
+            await set_state("normal")
+        try:
+            return await page.screenshot(full_page=True, timeout=15_000)
+        except PlaywrightTimeout:
+            return None
+        finally:
+            if minimized:
+                await set_state("minimized")
+    finally:
+        await cdp.detach()
+
+
+async def _cards(page: Page, use: str | None = None) -> list[parse.PaymentOption]:
+    """From checkout, read the saved cards on Amazon's payment page and, with `use` (last 4
+    digits), switch the order to that card. Opening checkout from the cart puts Amazon's
+    default card back, so a chosen card is applied again before an order is placed.
+    Leaves the page on checkout."""
+    spc = page.url
+    href = parse.payment_page_href(await page.content())
+    if not href:
+        if use:
+            raise AmazonError("Amazon's checkout page shows no way to change the card.")
+        return []
+    cards = [
+        c
+        for c in parse.parse_payment_options(await _open(page, BASE + href))
+        if not c.expired
+    ]
+    if not use:
+        await _open(page, spc)
+        return cards
+    if use not in {c.last4 for c in cards}:
+        await _open(page, spc)
+        raise AmazonError(f"No saved card ending in {use} that has not expired.")
+    await (
+        page.locator(".pmts-instrument-selector")
+        .filter(has_text=re.compile(rf"ending in {use}\b"))
+        .locator('input:not([value*="isExpired=true"])')
+        .first.check(force=True)
+    )
+    await page.get_by_role("button", name="Use this payment method").first.click()
+    await page.wait_for_url(re.compile(r"/spc"), timeout=30_000)
+    await page.wait_for_timeout(1_500)
+    await _check_blocked(page)
+    return cards
+
+
+async def checkout_preview(
+    session: Session, card: str | None = None
+) -> tuple[parse.CheckoutSummary, bytes | None, list[parse.PaymentOption]]:
+    """Open Amazon's checkout review page and read it, switching to `card` (last 4 digits)
+    first if given. Places nothing."""
     async with session.lock:
         page = await session.page()
-        html = await _open(page, CHECKOUT_URL)
+        await _open(page, CHECKOUT_URL)
         if "/checkout/" not in page.url:
             raise AmazonError(
                 "Amazon did not open checkout. The cart is probably empty."
             )
-        summary = parse.parse_checkout(html)
+        cards = await _cards(page, card)
+        summary = parse.parse_checkout(await page.content())
+        if card and parse.card_last4(summary.paying_with) != card:
+            await page.bring_to_front()
+            raise AmazonError(
+                f"Amazon did not switch to the card ending in {card}. It may want you to "
+                "confirm the card: do that in the Amazon window, then retry."
+            )
         if summary.total is None or not summary.can_place:
             await page.bring_to_front()
             raise AmazonError(
                 "Amazon's checkout page is asking for something first (address, payment or a choice). "
                 "Finish that in the Amazon window, then retry."
             )
-        return summary, await page.screenshot(full_page=True)
+        return summary, await _screenshot(page), cards
 
 
 async def place_order(session: Session, approved: parse.CheckoutSummary) -> str | None:
@@ -181,6 +254,10 @@ async def place_order(session: Session, approved: parse.CheckoutSummary) -> str 
     async with session.lock:
         page = await session.page()
         current = parse.parse_checkout(await _open(page, CHECKOUT_URL))
+        want = parse.card_last4(approved.paying_with)
+        if want and parse.card_last4(current.paying_with) != want:
+            await _cards(page, want)
+            current = parse.parse_checkout(await page.content())
         reason = parse.summaries_match(approved, current)
         if reason:
             raise AmazonError(
@@ -198,4 +275,19 @@ async def place_order(session: Session, approved: parse.CheckoutSummary) -> str 
                     "Clicked 'Place your order' but Amazon showed no confirmation. Check the Amazon "
                     "window and Your Orders before trying again, so nothing is ordered twice."
                 )
-        return parse.find_order_number(await page.inner_text("body"))
+        number = parse.find_order_number(await page.inner_text("body"))
+        return number or await _newest_order_number(page, approved.total)
+
+
+async def _newest_order_number(page: Page, total: float | None) -> str | None:
+    """Amazon's thank-you page can leave the order number out; Your Orders lists it.
+    Never raises: the order is already placed, and a lookup failure must not say otherwise."""
+    try:
+        html = await _open(page, f"{BASE}/your-orders/orders?timeFilter=last30")
+        today = date.today()
+        for o in parse.parse_orders(html, today):
+            if o.placed == today.isoformat() and o.total == total:
+                return o.order_number
+    except Exception:  # noqa: BLE001
+        pass
+    return None
