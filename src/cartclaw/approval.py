@@ -19,6 +19,15 @@ from typing import Awaitable, Callable
 from urllib.parse import parse_qs, urlparse
 
 from . import parse
+from .lifecycle import (
+    INITIAL,
+    STATE_LABELS,
+    TERMINAL,
+    ApprovalState,
+    IllegalTransition,
+    assert_transition,
+    next_states,
+)
 from .parse import CheckoutSummary, PaymentOption
 
 TTL_SECONDS = 15 * 60
@@ -31,7 +40,7 @@ class Approval:
     summary: CheckoutSummary
     screenshot: bytes | None
     created: float
-    status: str = "pending"  # pending, switching, placing, placed, rejected, expired, superseded, failed
+    status: ApprovalState = INITIAL
     detail: str = ""
     order_number: str | None = None
     cards: list[PaymentOption] = field(default_factory=list)
@@ -95,8 +104,8 @@ class Desk:
         with self._lock:
             # One cart, so only the newest request can be approved.
             for old in self._approvals.values():
-                if old.status in ("pending", "switching"):
-                    old.status = "superseded"
+                if ApprovalState.SUPERSEDED in next_states(old.status):
+                    old.status = ApprovalState.SUPERSEDED
             self._approvals[a.id] = a
         print(f"cartclaw: approval page {self.url(a)}", file=sys.stderr)
         self._open(self.url(a))
@@ -105,13 +114,18 @@ class Desk:
     def get(self, approval_id: str) -> Approval | None:
         with self._lock:
             a = self._approvals.get(approval_id)
-            if a and a.status == "pending" and time.time() - a.created > self._ttl:
-                a.status = "expired"
+            if (
+                a
+                and a.status == ApprovalState.PENDING
+                and time.time() - a.created > self._ttl
+            ):
+                a.status = assert_transition(a.status, ApprovalState.EXPIRED)
             return a
 
     def decide(
         self, approval_id: str, nonce: str, decision: str, card: str = ""
     ) -> tuple[int, str]:
+        """Raises IllegalTransition when the request can no longer take this decision."""
         a = self.get(approval_id)
         if not a or not secrets.compare_digest(a.nonce, nonce):
             return 403, "This approval link is not valid."
@@ -123,27 +137,33 @@ class Desk:
         if decision == "card":
             return 200, "unchanged"
         with self._lock:
-            if a.status != "pending":
-                return 409, f"This request is already {a.status}."
-            if decision == "reject":
-                a.status = "rejected"
-                return 200, "rejected"
-            if decision != "approve":
+            requested = (
+                ApprovalState.REJECTED
+                if decision == "reject"
+                else ApprovalState.PLACING
+            )
+            new = assert_transition(a.status, requested)
+            if decision not in ("reject", "approve"):
                 return 400, "Unknown decision."
-            a.status = "placing"
-        asyncio.run_coroutine_threadsafe(self._run_place(a), self._loop)
-        return 200, "placing"
+            if new == a.status:  # a repeated click: nothing runs a second time
+                return 200, new.value
+            a.status = new
+        if new == ApprovalState.PLACING:
+            asyncio.run_coroutine_threadsafe(self._run_place(a), self._loop)
+        return 200, new.value
 
     def switch_card(self, approval_id: str, nonce: str, last4: str) -> tuple[int, str]:
+        """Raises IllegalTransition when the request is no longer pending."""
         a = self.get(approval_id)
         if not a or not secrets.compare_digest(a.nonce, nonce):
             return 403, "This approval link is not valid."
         with self._lock:
-            if a.status != "pending":
-                return 409, f"This request is already {a.status}."
+            new = assert_transition(a.status, ApprovalState.SWITCHING)
             if not self._change_card or last4 not in {c.last4 for c in a.cards}:
                 return 400, "That card is not one of your saved cards."
-            a.status, a.detail, a.note = "switching", "", ""
+            if new == a.status:  # a repeated click: one switch runs
+                return 200, new.value
+            a.status, a.detail, a.note = new, "", ""
         asyncio.run_coroutine_threadsafe(self._run_switch(a, last4), self._loop)
         return 200, "switching"
 
@@ -154,8 +174,8 @@ class Desk:
         except Exception as e:  # shown on the page; the order keeps the card it had
             detail = f"Card not changed: {str(e) or type(e).__name__}"
         with self._lock:
-            if a.status != "switching":  # a newer request superseded it
-                return
+            if ApprovalState.PENDING not in next_states(a.status):
+                return  # a newer request superseded it
             if result:
                 a.summary, a.screenshot, a.cards = result
                 label = next((c.label for c in a.cards if c.last4 == last4), last4)
@@ -163,14 +183,34 @@ class Desk:
                     f"Card switched to {label}. Nothing is ordered yet: "
                     "check the total, then click Place order."
                 )
-            a.status, a.detail, a.created = "pending", detail, time.time()
+            a.status = assert_transition(a.status, ApprovalState.PENDING)
+            a.detail, a.created = detail, time.time()
 
     async def _run_place(self, a: Approval) -> None:
         try:
-            a.order_number = await self._place(a)
-            a.status = "placed"
+            number = await self._place(a)
         except Exception as e:  # the message is shown to the human and the agent
-            a.status, a.detail = "failed", str(e) or type(e).__name__
+            with self._lock:
+                new = assert_transition(a.status, ApprovalState.FAILED)
+                a.detail = str(e) or type(e).__name__
+                a.status = new
+            return
+        with self._lock:
+            new = assert_transition(a.status, ApprovalState.PLACED)
+            a.order_number = number
+            a.status = new
+
+
+def _status_json(a: Approval) -> bytes:
+    return json.dumps(
+        {
+            "status": a.status,
+            "detail": a.detail,
+            "order_number": a.order_number,
+            "terminal": a.status in TERMINAL,
+            "allowed_next": [s.value for s in next_states(a.status)],
+        }
+    ).encode()
 
 
 def _handler(desk: Desk) -> type[BaseHTTPRequestHandler]:
@@ -220,14 +260,7 @@ def _handler(desk: Desk) -> type[BaseHTTPRequestHandler]:
                     return self._send(404, b"", "image/png")
                 return self._send(200, a.screenshot, "image/png")
             if sub == "status":
-                body = json.dumps(
-                    {
-                        "status": a.status,
-                        "detail": a.detail,
-                        "order_number": a.order_number,
-                    }
-                )
-                return self._send(200, body.encode(), "application/json")
+                return self._send(200, _status_json(a), "application/json")
             self._send(200, render(a, desk.url(a)))
 
         def do_POST(self) -> None:
@@ -243,14 +276,25 @@ def _handler(desk: Desk) -> type[BaseHTTPRequestHandler]:
             if len(parts) != 3 or parts[0] != "a" or parts[2] != "decide":
                 return self._send(404, _page("Not found", "<p>Not found.</p>"))
             nonce = (form.get("n") or [""])[0]
-            code, msg = desk.decide(
-                parts[1],
-                nonce,
-                (form.get("decision") or [""])[0],
-                (form.get("card") or [""])[0],
-            )
+            wants_json = "application/json" in (self.headers.get("Accept") or "")
+            try:
+                code, msg = desk.decide(
+                    parts[1],
+                    nonce,
+                    (form.get("decision") or [""])[0],
+                    (form.get("card") or [""])[0],
+                )
+            except IllegalTransition as err:  # a stale tab or a double click
+                if wants_json:
+                    body = json.dumps(err.as_dict()).encode()
+                    return self._send(409, body, "application/json")
+                msg = f"This request is already {err.current}."
+                return self._send(409, _page("Not done", f"<p>{html.escape(msg)}</p>"))
             if code != 200:
                 return self._send(code, _page("Not done", f"<p>{html.escape(msg)}</p>"))
+            if wants_json:  # the state after the decision, as GET .../status reports it
+                body = _status_json(desk.get(parts[1]))
+                return self._send(200, body, "application/json")
             self.send_response(303)
             self.send_header("Location", f"/a/{parts[1]}?n={nonce}")
             self.end_headers()
@@ -304,8 +348,9 @@ def render(a: Approval, url: str) -> bytes:
         f"<td>{_money(v)}</td></tr>"
         for k, v in s.lines.items()
     )
+    nxt = next_states(a.status)
     pick = ""
-    if a.status == "pending" and len(a.cards) > 1:
+    if ApprovalState.SWITCHING in nxt and len(a.cards) > 1:
         current = parse.card_last4(s.paying_with)
         options = "".join(
             f'<option value="{e(c.last4)}"{" selected" if c.last4 == current else ""}>{e(c.label)}</option>'
@@ -333,55 +378,57 @@ def render(a: Approval, url: str) -> bytes:
         else ""
     )
     head = '<div class="tag">CartClaw</div>'
-    if a.status == "pending":
+    # Only moves the table allows get a button, so a finished request shows none.
+    buttons = (
+        f'<button class="go" name="decision" value="approve">Place order &middot; {_money(s.total)}</button>'
+        if ApprovalState.PLACING in nxt
+        else ""
+    ) + (
+        '<button name="decision" value="reject">Don\'t buy</button>'
+        if ApprovalState.REJECTED in nxt
+        else ""
+    )
+    if buttons:
         minutes = max(1, int((a.created + TTL_SECONDS - time.time()) // 60))
         form = (
             f'<form id="decide" method="post" action="/a/{e(a.id)}/decide"><input type="hidden" name="n" value="{e(a.nonce)}">'
-            f'<div class="actions"><button class="go" name="decision" value="approve">Place order &middot; {_money(s.total)}</button>'
-            f'<button name="decision" value="reject">Don\'t buy</button></div></form>'
+            f'<div class="actions">{buttons}</div></form>'
         )
         body = (
-            f'{head}<h1>Approve this Amazon order?</h1><p class="lede">Your agent asked to buy this. '
+            f'{head}<h1>{STATE_LABELS[a.status]}</h1><p class="lede">Your agent asked to buy this. '
             f'Nothing is ordered until you click Place order.</p><div class="card"><p class="total">{_money(s.total)}</p>'
             f'<ul class="items">{items}</ul><table>{rows}</table>{facts}{notice}{form}'
             f'<p class="note">This request expires in {minutes} min. The order is checked again right before it is placed; '
             f"if the total, items, address or card changed, nothing is ordered.</p></div>{shot}"
         )
         return _page(f"Approve {_money(s.total)} order", body)
-    states = {
-        "switching": (
-            "Switching card…",
+    states = {  # (text, warn); the headline comes from STATE_LABELS
+        ApprovalState.SWITCHING: (
             "Amazon is changing the card on this order. This page updates by itself.",
             False,
         ),
-        "placing": (
-            "Placing your order…",
-            "Keep this page open; it updates by itself.",
-            False,
-        ),
-        "placed": (
-            "Order placed",
+        ApprovalState.PLACING: ("Keep this page open; it updates by itself.", False),
+        ApprovalState.PLACED: (
             f"Amazon order {e(a.order_number)}."
             if a.order_number
             else "Amazon confirmed the order. It will show in Your Orders.",
             False,
         ),
-        "rejected": ("Not ordered", "You chose Don't buy.", False),
-        "expired": (
-            "Not ordered",
+        ApprovalState.REJECTED: ("You chose Don't buy.", False),
+        ApprovalState.EXPIRED: (
             "This request expired. Ask your agent again if you still want it.",
             True,
         ),
-        "superseded": (
-            "Not ordered",
+        ApprovalState.SUPERSEDED: (
             "Your agent sent a newer request; use that page instead.",
             True,
         ),
-        "failed": ("Not ordered", e(a.detail), True),
+        ApprovalState.FAILED: (e(a.detail), True),
     }
-    title, text, bad = states[a.status]
+    title, (text, bad) = STATE_LABELS[a.status], states[a.status]
     body = (
         f'{head}<p class="state{" bad" if bad else ""}">{title}</p><p class="lede">{text}</p>'
         f'<div class="card"><p class="total">{_money(s.total)}</p><ul class="items">{items}</ul>{facts}</div>'
     )
-    return _page(title, body, refresh=a.status in ("placing", "switching"))
+    refresh = a.status in (ApprovalState.PLACING, ApprovalState.SWITCHING)
+    return _page(title, body, refresh=refresh)

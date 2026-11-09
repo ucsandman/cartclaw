@@ -14,6 +14,7 @@ from mcp_types import ToolAnnotations
 from . import amazon
 from .approval import Approval, Desk
 from .browser import BrowserError, Session
+from .lifecycle import TERMINAL, next_states
 
 INSTRUCTIONS = """Shop the user's own Amazon account through a dedicated browser window on their machine.
 Read orders, return deadlines, products and the cart freely. To buy, put items in the cart and call
@@ -63,6 +64,8 @@ def _approval_view(a: Approval) -> dict[str, Any]:
         "total": a.summary.total,
         "items": a.summary.items,
         "paying_with": a.summary.paying_with,
+        "terminal": a.status in TERMINAL,
+        "allowed_next": [s.value for s in next_states(a.status)],
     }
 
 
@@ -126,7 +129,9 @@ async def checkout_request() -> dict[str, Any]:
 @mcp.tool(annotations=READ)
 async def checkout_status(approval_id: str) -> dict[str, Any]:
     """Where an approval stands: pending, switching (the user is changing the card), placing,
-    placed (with order_number), rejected, expired, superseded or failed (with detail)."""
+    placed (with order_number), rejected, expired, superseded or failed (with detail).
+    terminal is true once the status can no longer change; allowed_next lists the states it
+    can still move to."""
     a = _desk.get(approval_id) if _desk else None
     if not a:
         raise ToolError(f"No approval {approval_id} in this session.")

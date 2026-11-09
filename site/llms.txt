@@ -12,7 +12,7 @@
 - product: title, price and availability for an ASIN
 - cart, cart_add, cart_remove: read and change the cart
 - checkout_request: opens Amazon's checkout review (places nothing) and an approval page for the human
-- checkout_status: pending, placed (with order number), rejected, expired, superseded or failed
+- checkout_status: pending, switching (the user is changing the card), placing, placed (with order number), rejected, expired, superseded or failed (with detail); terminal and allowed_next say whether to keep polling
 
 ## Notes
 
